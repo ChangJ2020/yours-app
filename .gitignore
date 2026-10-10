@@ -8,6 +8,13 @@ dist/
 dist-ssr/
 *.local
 
+# IDE 配置
+.idea/
+*.iml
+*.ipr
+*.iws
+out/
+
 # 本地 npm 缓存（本工程安装依赖时使用了 --cache .npmcache，避免污染全局缓存）
 .npmcache/
 

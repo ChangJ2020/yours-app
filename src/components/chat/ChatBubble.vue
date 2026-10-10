@@ -9,11 +9,19 @@
         <span class="who">{{ message.role === 'assistant' ? 'YA 产品架构师' : '我' }}</span>
         <span class="time">{{ time }}</span>
         <span v-if="message.streaming" class="ya-badge ya-badge-brand">生成中…</span>
+        <span v-else-if="message.mode === 'ai'" class="ya-badge ya-badge-ok ya-badge-mono" :title="tokenTitle">
+          🤖 {{ message.model || 'AI' }}{{ latencyText }}
+        </span>
+        <span v-else-if="message.mode === 'local'" class="ya-badge" title="由内置规则引擎生成，未调用模型">
+          ⚙️ 内置引擎
+        </span>
+        <span v-if="message.errorKind" class="ya-badge ya-badge-danger">调用失败</span>
       </div>
       <div class="content" :data-tone="message.tone || 'default'">
         <MarkdownText :text="message.content" />
         <span v-if="message.streaming" class="caret" />
       </div>
+      <p v-if="message.note" class="note">ℹ️ {{ message.note }}</p>
       <div v-if="message.role === 'assistant' && actions" class="actions">
         <slot name="actions" />
       </div>
@@ -33,6 +41,19 @@ const props = defineProps({
 const time = computed(() => {
   const d = new Date(props.message.at || Date.now())
   return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
+})
+
+const latencyText = computed(() => {
+  const ms = props.message.latencyMs
+  if (!ms) return ''
+  return ` · ${(ms / 1000).toFixed(1)}s`
+})
+
+const tokenTitle = computed(() => {
+  const u = props.message.usage
+  if (!u) return '由真实模型生成（未返回 token 统计）'
+  const total = u.total_tokens || (u.prompt_tokens || 0) + (u.completion_tokens || 0)
+  return `由 ${props.message.model || '模型'} 生成 · 输入 ${u.prompt_tokens ?? '-'} / 输出 ${u.completion_tokens ?? '-'} / 合计 ${total || '-'} tokens`
 })
 </script>
 
@@ -124,6 +145,17 @@ const time = computed(() => {
 .content[data-tone='success'] {
   border-color: color-mix(in srgb, var(--ok-500) 35%, transparent);
   background: color-mix(in srgb, var(--ok-50) 70%, var(--bg-elevated));
+}
+
+.content[data-tone='error'] {
+  border-color: color-mix(in srgb, var(--danger-500) 35%, transparent);
+  background: color-mix(in srgb, var(--danger-50) 70%, var(--bg-elevated));
+}
+
+.note {
+  font-size: 11.5px;
+  color: var(--text-muted);
+  padding-left: 2px;
 }
 
 .caret {

@@ -90,7 +90,16 @@ export function buildMessages({ stage, history = [], userText, currentSpec = nul
     .join('\n\n')
 
   const messages = [{ role: 'system', content: system }]
-  for (const m of history.slice(-12)) {
+  // 防御：历史末尾若已包含与本轮相同的 user 消息，先剔除，避免重复发给模型
+  const cleaned = [...history]
+  while (
+    cleaned.length &&
+    cleaned[cleaned.length - 1].role === 'user' &&
+    cleaned[cleaned.length - 1].content === userText
+  ) {
+    cleaned.pop()
+  }
+  for (const m of cleaned.slice(-12)) {
     if (m.role === 'user' || m.role === 'assistant') messages.push({ role: m.role, content: m.content })
   }
   messages.push({ role: 'user', content: userText })
@@ -100,7 +109,8 @@ export function buildMessages({ stage, history = [], userText, currentSpec = nul
 /** 从模型回复里抽出 spec 代码块 */
 export function extractSpecJson(text) {
   if (!text) return null
-  const fenced = [...String(text).matchAll(/```(?:json|JSON)?\s*([\s\S]*?)```/g)].map((m) => m[1].trim())
+  const raw = String(text)
+  const fenced = [...raw.matchAll(/```(?:json|JSON)?\s*([\s\S]*?)```/g)].map((m) => m[1].trim())
   for (const block of fenced.reverse()) {
     try {
       const obj = JSON.parse(block)
@@ -110,4 +120,11 @@ export function extractSpecJson(text) {
     }
   }
   return null
+}
+
+/** 结构化数据是否「写了一半」——流式被中断时常见，需要提示用户重试而不是静默采纳半成品 */
+export function looksLikeTruncatedSpec(text) {
+  const raw = String(text || '')
+  const opens = (raw.match(/```/g) || []).length
+  return opens % 2 === 1
 }

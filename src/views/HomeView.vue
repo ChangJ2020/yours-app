@@ -12,9 +12,19 @@
         </div>
 
         <div class="ya-row" style="gap: 8px">
-          <span class="ya-badge" :class="settings.llmReady ? 'ya-badge-brand' : 'ya-badge-info'">
-            {{ settings.llmReady ? '🤖 ' + settings.modeLabel : '⚙️ 内置引擎模式' }}
-          </span>
+          <button
+            class="mode-pill"
+            :data-mode="settings.aiMode ? 'ai' : 'local'"
+            :title="
+              settings.aiMode
+                ? `当前使用 ${settings.effectiveLlm.model} 生成，点击切回内置引擎`
+                : '当前使用内置规则引擎，点击启用 AI 对话'
+            "
+            @click="onToggleMode(!settings.aiMode)"
+          >
+            <span class="pill-dot" />
+            {{ settings.aiMode ? `AI 对话 · ${settings.effectiveLlm.model}` : '内置引擎模式' }}
+          </button>
           <button class="ya-btn ya-btn-quiet ya-btn-icon" title="AI 引擎设置" @click="showSettings = true">⚙️</button>
           <button
             class="ya-btn ya-btn-quiet ya-btn-icon"
@@ -65,10 +75,16 @@
           <ChatStudio
             ref="studioRef"
             :chat="chat"
-            :mode-label="settings.modeLabel"
+            :ai-mode="settings.aiMode"
+            :model-name="settings.effectiveLlm.model"
             @send="onSend"
             @generate="onGenerate"
             @reset="onReset"
+            @stop="onStop"
+            @retry="onRetry"
+            @fallback-local="onFallbackLocal"
+            @toggle-mode="onToggleMode"
+            @open-settings="showSettings = true"
           />
         </div>
 
@@ -290,7 +306,7 @@ import { useSettingsStore } from '@/stores/settings.js'
 import { APP_SPEC_VERSION, FIELD_TYPE_MAP } from '@/engine/spec.js'
 import { QUICK_IDEAS } from '@/engine/localEngine.js'
 import { estimateUsage, STORE, dbBulkPut, resetAll } from '@/services/db.js'
-import { buildDemoRecords, DEMO_SPEC, isSeeded, markSeeded, clearSeedFlag } from '@/services/demoData.js'
+import { buildDemoRecords, DEMO_SPEC, markSeeded, clearSeedFlag } from '@/services/demoData.js'
 import { exportApp as exportAppPayload, importApp } from '@/services/storageService.js'
 import { downloadFile, formatBytes } from '@/utils/format.js'
 import { toast } from '@/composables/useToast.js'
@@ -321,24 +337,56 @@ onMounted(async () => {
 
 /** 首次打开植入演示数据，保证开箱可见效果 */
 async function seedIfNeeded() {
-  if (isSeeded()) return
-  try {
-    const existing = await apps.fetchOne(DEMO_SPEC.appId)
-    if (!existing) {
-      await apps.create(DEMO_SPEC)
-      await dbBulkPut(STORE.RECORDS, buildDemoRecords())
-      await apps.refresh()
-      toast.info('已为你准备了一个演示应用「员工工时记录助手」，可直接进入体验', '欢迎使用 Yours App')
-    }
+  // 以「数据是否真的存在」为准，避免刷新标记与数据库状态不一致时白屏
+  const existing = await apps.fetchOne(DEMO_SPEC.appId).catch(() => null)
+  if (existing) {
     markSeeded()
+    return
+  }
+  try {
+    await apps.create(DEMO_SPEC)
+    await dbBulkPut(STORE.RECORDS, buildDemoRecords())
+    await apps.refresh()
+    markSeeded()
+    toast.info('已为你准备了一个演示应用「员工工时记录助手」，可直接进入体验', '欢迎使用 Yours App')
   } catch (e) {
     console.warn('演示数据植入失败', e)
   }
 }
 
 async function onSend(text) {
-  const { created } = await chat.send(text)
+  const { created, error } = await chat.send(text)
   if (created) await afterCreated(created)
+  if (error && !created) {
+    // 错误详情已在对话区与气泡中展示，这里只做一次轻提示，避免重复打扰
+    toast.error(error.hint || error.message, '模型调用失败')
+  }
+}
+
+async function onRetry() {
+  const { created, error } = await chat.retryLast()
+  if (created) await afterCreated(created)
+  if (!error) toast.info('已重试并成功')
+}
+
+async function onFallbackLocal() {
+  await chat.fallbackToLocal()
+  toast.info('已切换到内置引擎模式，后续对话不再调用模型')
+}
+
+function onStop() {
+  chat.abortGeneration()
+  toast.info('已请求停止生成')
+}
+
+function onToggleMode(next) {
+  if (next && !settings.llmReady) {
+    showSettings.value = true
+    toast.warn('请先填写接口地址、模型名与 API Key', '需要先配置 AI 接口')
+    return
+  }
+  settings.setAiMode(next)
+  toast.ok(next ? `已启用 AI 对话（${settings.effectiveLlm.model}）` : '已切换到内置引擎模式')
 }
 
 async function onGenerate() {
@@ -489,6 +537,49 @@ async function onImportFile(event) {
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);
   box-shadow: var(--shadow-xs);
+}
+
+/* 顶栏 AI 模式指示（可点击切换） */
+.mode-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  height: 28px;
+  padding: 0 12px;
+  border-radius: var(--radius-full);
+  font-size: 12px;
+  font-weight: 600;
+  border: 1px solid var(--border);
+  background: var(--bg-subtle);
+  color: var(--text-secondary);
+  transition: all var(--dur) var(--ease-out);
+}
+
+.mode-pill:hover {
+  border-color: var(--brand-400);
+  color: var(--text-primary);
+}
+
+.mode-pill[data-mode='ai'] {
+  background: var(--brand-50);
+  border-color: color-mix(in srgb, var(--brand-500) 42%, transparent);
+  color: var(--brand-700);
+}
+
+:root[data-theme='dark'] .mode-pill[data-mode='ai'] {
+  color: var(--brand-300);
+}
+
+.pill-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--text-muted);
+}
+
+.mode-pill[data-mode='ai'] .pill-dot {
+  background: var(--ok-500);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--ok-500) 22%, transparent);
 }
 
 .hs {

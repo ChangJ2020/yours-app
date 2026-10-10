@@ -15,6 +15,14 @@ import { setTimeout as sleep } from 'node:timers/promises'
 const BASE = process.argv[2] || 'http://localhost:5273'
 const OUT = process.argv[3] || 'verify-shots'
 const PORT = 9333
+/**
+ * AI 模式：把前端配置指向本地模拟模型服务，用于验证
+ * 「真的发出了 HTTP 请求 → 流式渲染 → 解析 Spec → 生成应用」整条链路。
+ * 用法：node scripts/e2e-verify.mjs http://localhost:5273 verify-shots --ai
+ * 需先启动：node scripts/mock-llm-server.mjs
+ */
+const AI_MODE = process.argv.includes('--ai')
+const MOCK_LLM = process.env.MOCK_LLM_URL || 'http://127.0.0.1:8787/v1'
 
 const CHROME_CANDIDATES = [
   'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
@@ -219,20 +227,75 @@ async function main() {
     /* ---------------- 1. 冷启动：清空本地存储后加载首页 ---------------- */
     await cdp.send('Page.navigate', { url: BASE })
     await waitFor(cdp, `document.readyState === 'complete'`, { label: '文档就绪', timeout: 15000 })
+    // 先只清 localStorage（快）
     await cdp.evaluate(`
       try { localStorage.clear(); } catch (e) {}
-      await new Promise((resolve) => {
-        const req = indexedDB.deleteDatabase('yours_app_db');
-        req.onsuccess = req.onerror = req.onblocked = () => resolve();
-        setTimeout(resolve, 1500);
-      });
       return true;
     `)
+    // 再刷新一次，让上一个页面实例释放它的数据库连接，之后的 deleteDatabase 才不会被 blocked
     await cdp.send('Page.reload', { ignoreCache: true })
-    await waitFor(cdp, `document.querySelector('.ya-topbar') && document.body.innerText.includes('Yours App')`, {
-      label: '首页渲染',
-      timeout: 15000,
-    })
+    await waitFor(cdp, `document.readyState === 'complete'`, { label: '文档就绪(2)', timeout: 15000 })
+    const resetResult = await cdp.evaluate(`
+      const outcome = await new Promise((resolve) => {
+        const req = indexedDB.deleteDatabase('yours_app_db');
+        req.onsuccess = () => resolve('deleted');
+        req.onerror = () => resolve('error');
+        req.onblocked = () => resolve('blocked');
+        setTimeout(() => resolve('timeout'), 4000);
+      });
+      return { outcome };
+    `)
+    if (resetResult.outcome !== 'deleted') {
+      console.warn('⚠️  IndexedDB 清理结果：', JSON.stringify(resetResult))
+    }
+    /* ---------------- 1.5 开启 AI 模式（指向本地模拟模型服务） ---------------- */
+    if (AI_MODE) {
+      await cdp.evaluate(`
+        localStorage.setItem('ya:llm-config', JSON.stringify({
+          enabled: true,
+          forceLocal: false,
+          baseUrl: ${JSON.stringify(MOCK_LLM)},
+          model: 'mock-ya',
+          apiKey: 'mock-key',
+          temperature: 0.3,
+          stream: true,
+        }));
+        return true;
+      `)
+      // 探活：确认模拟服务在跑，否则给出明确提示
+      const alive = await cdp.evaluate(`
+        try {
+          const r = await fetch(${JSON.stringify(MOCK_LLM.replace('/v1', '/_requests'))}, { method: 'GET' });
+          return r.ok;
+        } catch (e) { return false; }
+      `)
+      if (!alive) {
+        console.warn(`⚠️  模拟模型服务未启动（${MOCK_LLM}），请先运行：node scripts/mock-llm-server.mjs`)
+      } else {
+        await cdp.evaluate(`
+          await fetch(${JSON.stringify(MOCK_LLM.replace('/v1', '/_reset'))}, { method: 'POST' });
+          return true;
+        `)
+      }
+    }
+
+    await cdp.send('Page.reload', { ignoreCache: true })
+    try {
+      await waitFor(cdp, `document.querySelector('.ya-topbar') && document.body.innerText.includes('Yours App')`, {
+        label: '首页渲染',
+        timeout: 15000,
+      })
+    } catch (e) {
+      const state = await cdp.evaluate(`
+        return {
+          url: location.href,
+          html: document.body ? document.body.innerHTML.slice(0, 200) : '',
+          pageErrors: ${JSON.stringify(cdp.pageErrors().slice(-4))},
+          consoleErrors: ${JSON.stringify(cdp.consoleErrors().slice(-4))},
+        };
+      `)
+      throw new Error(`${e.message} | 诊断=${JSON.stringify(state)}`)
+    }
     await sleep(1400) // 等待演示数据播种与首屏动画
     await cdp.screenshot(join(OUT, '01-home.png'))
 
@@ -243,66 +306,261 @@ async function main() {
         moduleScripts: document.querySelectorAll('script[type=module]').length,
         appCards: document.querySelectorAll('.app-card').length,
         hasSteps: !!document.querySelector('.steps'),
-        modeBadge: text.includes('内置引擎模式') || text.includes('AI 模式'),
+        aiMode: text.includes('AI 对话'),
+        localMode: text.includes('内置引擎模式'),
         cards: Array.from(document.querySelectorAll('.app-card .app-name')).map((e) => e.textContent.trim()),
         vueMounted: !!document.querySelector('#app').firstElementChild,
+        modePill: (document.querySelector('.mode-pill') || {}).textContent || '',
       };
     `)
     record('首页渲染与 Vue 挂载', home.vueMounted && home.hasSteps, JSON.stringify(home))
-    await waitFor(cdp, `document.querySelectorAll('.app-card').length >= 1`, {
-      label: '演示应用卡片',
-      timeout: 15000,
-    })
+    try {
+      await waitFor(cdp, `document.querySelectorAll('.app-card').length >= 1`, {
+        label: '演示应用卡片',
+        timeout: 15000,
+      })
+    } catch (e) {
+      const state = await cdp.evaluate(`
+        const pinia = window.__YA_PINIA__;
+        const apps = pinia ? pinia._s.get('apps') : null;
+        const seeded = (() => { try { return localStorage.getItem('ya:seeded'); } catch (err) { return 'err'; } })();
+        // 直接读 IndexedDB，确认数据到底有没有落库
+        const dbApps = await new Promise((resolve) => {
+          const open = indexedDB.open('yours_app_db');
+          open.onsuccess = () => {
+            const db = open.result;
+            if (!db.objectStoreNames.contains('apps_meta')) return resolve({ names: Array.from(db.objectStoreNames) });
+            const req = db.transaction('apps_meta', 'readonly').objectStore('apps_meta').getAll();
+            req.onsuccess = () => resolve(req.result.map((a) => ({ appId: a.appId, name: a.appName })));
+            req.onerror = () => resolve('read-error');
+          };
+          open.onerror = () => resolve('open-error');
+        });
+        return {
+          seededFlag: seeded,
+          appsCount: apps ? apps.apps.length : null,
+          appsLoading: apps ? apps.loading : null,
+          appsError: apps ? apps.error : null,
+          dbApps,
+          pageErrors: ${JSON.stringify(cdp.pageErrors().slice(-3))},
+          consoleErrors: ${JSON.stringify(cdp.consoleErrors().slice(-3))},
+        };
+      `)
+      throw new Error(`${e.message} | 播种诊断=${JSON.stringify(state)}`)
+    }
     record('首次打开自动植入演示应用', true, `卡片：${home.cards.join('、')}`)
+    if (AI_MODE) {
+      record('AI 模式已启用（顶栏显示 AI 对话）', home.aiMode && !home.localMode, JSON.stringify(home.modePill))
+    }
 
-    /* ---------------- 2. 阶段 1：需求描述 → 功能清单 ---------------- */
+    /* ---------------- 2. 阶段 1：需求描述 → 功能清单（AI 模式：真实调用模型） ---------------- */
     await cdp.type('textarea.composer-input', '我需要一个记录员工工时和加班的 App，可以按部门查询并导出')
     await cdp.evaluate(CLICK_COMPOSER('发送'))
-    await waitFor(cdp, `document.body.innerText.includes('工时快速填报')`, { label: '功能清单生成', timeout: 15000 })
+    if (AI_MODE) {
+      // 断言「真的发出了 HTTP 请求」，而不是本地拼字符串
+      // 等待流式结束（气泡不再显示「生成中…」），避免读到中途状态
+      try {
+        await waitFor(
+          cdp,
+          `!document.querySelector('.bubble .ya-badge-brand') && !!document.querySelector('.bubble .ya-badge-mono')`,
+          { label: 'AI 回复完成（出现模型徽标）', timeout: 25000 },
+        )
+      } catch (e) {
+        const state = await cdp.evaluate(`
+          const pinia = window.__YA_PINIA__;
+          const chat = pinia ? pinia._s.get('chat') : null;
+          const bubbles = Array.from(document.querySelectorAll('.bubble'));
+          return {
+            aiStatus: chat ? chat.aiStatus : null,
+            lastError: chat ? chat.lastError : null,
+            modeNote: chat ? chat.modeNote : null,
+            bubbleCount: bubbles.length,
+            lastBubble: bubbles.length ? bubbles[bubbles.length - 1].innerText.slice(0, 200) : '',
+            messagesTail: chat ? chat.messages.slice(-3).map((m) => ({ role: m.role, mode: m.mode, err: m.errorKind, len: m.content.length })) : null,
+            errorPanelShown: !!document.querySelector('.ai-error'),
+            pageErrors: ${JSON.stringify(cdp.pageErrors().slice(-3))},
+          };
+        `)
+        throw new Error(`${e.message} | AI 状态=${JSON.stringify(state)}`)
+      }
+      const aiTurn = await cdp.evaluate(`
+        const bubbles = Array.from(document.querySelectorAll('.bubble'));
+        const assistant = bubbles.filter((b) => b.dataset.role === 'assistant').pop();
+        const badge = assistant ? assistant.querySelector('.ya-badge-mono') : null;
+        return {
+          badgeText: badge ? badge.textContent.trim() : '',
+          title: badge ? badge.getAttribute('title') : '',
+          contentChars: assistant ? assistant.innerText.length : 0,
+          streamingLeft: !!document.querySelector('.bubble .ya-badge-brand'),
+        };
+      `)
+      record(
+        'AI 回复：显示模型名与耗时徽标',
+        /mock-ya/.test(aiTurn.badgeText) && aiTurn.contentChars > 40 && !aiTurn.streamingLeft,
+        JSON.stringify(aiTurn),
+      )
+      // 直接问模拟服务：它到底收到了什么
+      const log = await cdp.evaluate(`
+        const r = await fetch(${JSON.stringify(MOCK_LLM.replace('/v1', '/_requests'))});
+        return await r.json();
+      `)
+      const last = Array.isArray(log) ? log[log.length - 1] : null
+      const rawTurn = await cdp.evaluate(`
+        const pinia = window.__YA_PINIA__;
+        const chat = pinia._s.get('chat');
+        const assistants = chat.messages.filter((m) => m.role === 'assistant');
+        const last = assistants[assistants.length - 1] || {};
+        const content = last.content || '';
+        return {
+          lastAssistantLen: content.length,
+          lastAssistantHead: content.slice(0, 100),
+          hasJsonFence: content.indexOf('\`\`\`json') !== -1,
+          mode: last.mode,
+          model: last.model,
+          latencyMs: last.latencyMs,
+          usage: last.usage,
+          specPresent: !!chat.spec,
+          stepKey: chat.stepKey,
+          featureCount: chat.featureList.length,
+        };
+      `)
+      record(
+        '模型返回内容被前端完整接收（含结构化 Spec 代码块）',
+        rawTurn.hasJsonFence && rawTurn.specPresent && rawTurn.featureCount >= 2,
+        JSON.stringify(rawTurn),
+      )
+      const dupUser =
+        last && last.messageRoles.length >= 2
+          ? last.messageRoles[last.messageRoles.length - 1] === 'user' &&
+            last.messageRoles[last.messageRoles.length - 2] === 'user'
+          : true
+      record(
+        '后端确实收到请求（含鉴权头 / 流式 / 阶段提示词）',
+        Boolean(last && last.stream && last.hasAuthHeader && last.systemHasStageGuide),
+        JSON.stringify(last),
+      )
+      record('请求体不含重复的最后一条用户消息', dupUser === false, `roles=${last?.messageRoles?.join(',')}`)
+    }
+    // AI 模式下功能清单来自模型（模拟服务给出「工时记录填报」等），本地模式来自内置引擎
+    await waitFor(
+      cdp,
+      AI_MODE
+        ? `document.querySelectorAll('.feat-item').length >= 2`
+        : `document.body.innerText.includes('工时快速填报')`,
+      { label: '功能清单生成', timeout: 20000 },
+    )
     const step1 = await cdp.evaluate(`
       const text = document.body.innerText;
       return {
         featureItems: document.querySelectorAll('.feat-item').length,
+        featureTitles: Array.from(document.querySelectorAll('.feat-item .feat-title')).map((e) => e.textContent.trim()),
         sidebarHasFeatures: text.includes('功能清单'),
         chips: Array.from(document.querySelectorAll('.composer .chip')).map((e) => e.textContent.trim()).slice(0, 4),
         stepActive: (document.querySelector('.step[data-state="active"] .step-title') || {}).textContent || '',
+        fieldPills: document.querySelectorAll('.field-pill').length,
+        hasGenerateBtn: !!${FIND_BTN('确认并生成应用')},
       };
     `)
-    record('阶段 1→2：自然语言描述生成功能清单', step1.featureItems >= 2, JSON.stringify(step1))
+    record(
+      AI_MODE
+        ? '阶段 1→2：AI 对话产出功能清单 + 结构化 Spec'
+        : '阶段 1→2：对话产出功能清单',
+      // AI 模式：模型这一轮就给出完整 Spec，因此详细规格随即可见
+      // 内置引擎模式：本阶段只产出功能清单，Spec 在用户确认后才生成
+      AI_MODE ? step1.featureItems >= 2 && step1.fieldPills > 0 : step1.featureItems >= 2,
+      JSON.stringify(step1),
+    )
 
     /* ---------------- 3. 阶段 2：自然语言增加功能 ---------------- */
     await cdp.type('textarea.composer-input', '增加记录月度优秀员工的功能')
     await cdp.evaluate(CLICK_COMPOSER('发送'))
-    await waitFor(cdp, `document.body.innerText.includes('月度优秀员工记录')`, { label: '新增功能生效', timeout: 15000 })
-    const step2 = await cdp.evaluate(`
-      return {
-        items: document.querySelectorAll('.feat-item').length,
-        hasNew: document.body.innerText.includes('月度优秀员工记录'),
-      };
-    `)
-    record('阶段 2：自然语言新增功能', step2.hasNew, JSON.stringify(step2))
+    if (AI_MODE) {
+      const log = await cdp.evaluate(`
+        const r = await fetch(${JSON.stringify(MOCK_LLM.replace('/v1', '/_requests'))});
+        return await r.json();
+      `)
+      const last = Array.isArray(log) ? log[log.length - 1] : null
+      record(
+        '阶段 2：修改需求同样发给了模型（多轮上下文）',
+        last?.lastUser === '增加记录月度优秀员工的功能' && last.messageRoles.filter((r) => r === 'assistant').length >= 1,
+        `roles=${last?.messageRoles?.join(',')}`,
+      )
+      // 模型给出的是「工时记录」相关的完整 Spec，这里校验界面确实按 Spec 渲染
+      // 先等这一轮流式真正结束，否则会读到写了一半的 JSON
+      await waitFor(
+        cdp,
+        `!document.querySelector('.bubble .ya-badge-brand') && document.querySelectorAll('.bubble .ya-badge-mono').length >= 2`,
+        { label: '第二轮 AI 回复完成', timeout: 25000 },
+      )
+      await sleep(600)
+      const aiStep2 = await cdp.evaluate(`
+        const pinia = window.__YA_PINIA__;
+        const chat = pinia._s.get('chat');
+        const last = chat.messages.filter((m) => m.role === 'assistant').pop() || {};
+        const first = chat.messages.filter((m) => m.role === 'assistant')[0] || {};
+        return {
+          stepKey: chat.stepKey,
+          stepsActive: (document.querySelector('.step[data-state="active"] .step-title') || {}).textContent || '',
+          specPresent: !!chat.spec,
+          hasGenerateBtn: !!${FIND_BTN('确认并生成应用')},
+          aiStatus: chat.aiStatus,
+          modeNote: chat.modeNote,
+          lastError: chat.lastError,
+          llmTrace: window.__YA_LLM_TRACE__ || null,
+          messageCounts: chat.messages.reduce((acc, m) => {
+            acc[m.role] = (acc[m.role] || 0) + 1;
+            return acc;
+          }, {}),
+          // 关键：把「解析结果」直接暴露出来，判断问题出在解析还是状态机
+          parseProbe: await import('/src/engine/prompt.js').then((m) => {
+            const r = m.extractSpecJson(last.content || '');
+            return r ? { ok: true, appName: r.appName, fields: (r.entities?.[0]?.fields || []).length } : { ok: false };
+          }),
+          firstTurnParse: await import('/src/engine/prompt.js').then((m) => {
+            const r = m.extractSpecJson(first.content || '');
+            return r ? { ok: true, appName: r.appName } : { ok: false };
+          }),
+        };
+      `)
+      record(
+        'AI 模式：模型输出的多轮 Spec 已被采纳（进入详细规格阶段）',
+        aiStep2.specPresent && aiStep2.stepKey === 'spec' && aiStep2.hasGenerateBtn,
+        JSON.stringify(aiStep2),
+      )
+    } else {
+      await waitFor(cdp, `document.body.innerText.includes('月度优秀员工记录')`, { label: '新增功能生效', timeout: 15000 })
+      const step2 = await cdp.evaluate(`
+        return {
+          items: document.querySelectorAll('.feat-item').length,
+          hasNew: document.body.innerText.includes('月度优秀员工记录'),
+        };
+      `)
+      record('阶段 2：自然语言新增功能', step2.hasNew, JSON.stringify(step2))
 
-    /* ---------------- 4. 阶段 2：自然语言删除功能 ---------------- */
-    await cdp.type('textarea.composer-input', '去掉工时明细与汇总')
-    await cdp.evaluate(CLICK_COMPOSER('发送'))
-    await sleep(1200)
-    const step2b = await cdp.evaluate(`
-      const items = Array.from(document.querySelectorAll('.feat-item .feat-title')).map((e) => e.textContent.trim());
-      return { items, removed: !items.some((t) => t.includes('工时明细与汇总')) };
-    `)
-    record('阶段 2：自然语言删除功能', step2b.removed, JSON.stringify(step2b))
+      /* ---------------- 4. 阶段 2：自然语言删除功能 ---------------- */
+      await cdp.type('textarea.composer-input', '去掉工时明细与汇总')
+      await cdp.evaluate(CLICK_COMPOSER('发送'))
+      await sleep(1200)
+      const step2b = await cdp.evaluate(`
+        const items = Array.from(document.querySelectorAll('.feat-item .feat-title')).map((e) => e.textContent.trim());
+        return { items, removed: !items.some((t) => t.includes('工时明细与汇总')) };
+      `)
+      record('阶段 2：自然语言删除功能', step2b.removed, JSON.stringify(step2b))
+    }
 
     /* ---------------- 5. 阶段 2→3：确认后产出详细规格 ---------------- */
-    await cdp.type('textarea.composer-input', '功能没问题，继续')
-    const clicked = await cdp.evaluate(CLICK_COMPOSER('发送'))
-    if (!clicked) throw new Error('未找到输入区的发送按钮')
-    try {
-      await waitFor(cdp, `document.body.innerText.includes('数据表') || document.body.innerText.includes('填写页')`, {
-        label: '详细规格生成',
-        timeout: 15000,
-      })
-    } catch (e) {
-      throw new Error(`${e.message} | 诊断=${JSON.stringify(await diag())}`)
+    if (!AI_MODE) {
+      await cdp.type('textarea.composer-input', '功能没问题，继续')
+      const clicked = await cdp.evaluate(CLICK_COMPOSER('发送'))
+      if (!clicked) throw new Error('未找到输入区的发送按钮')
+      try {
+        await waitFor(cdp, `document.body.innerText.includes('数据表') || document.body.innerText.includes('填写页')`, {
+          label: '详细规格生成',
+          timeout: 15000,
+        })
+      } catch (e) {
+        throw new Error(`${e.message} | 诊断=${JSON.stringify(await diag())}`)
+      }
     }
     await sleep(500)
     await cdp.screenshot(join(OUT, '02-spec-confirm.png'))
@@ -316,7 +574,11 @@ async function main() {
         stepActive: (document.querySelector('.step[data-state="active"] .step-title') || {}).textContent || '',
       };
     `)
-    record('阶段 2→3：确认后联动生成详细 Spec', step3.hasTable && step3.hasGenerateBtn, JSON.stringify(step3))
+    record(
+      '阶段 2→3：详细 Spec 已就绪（可确认生成）',
+      step3.hasTable && step3.fieldPills > 0 && step3.hasGenerateBtn,
+      JSON.stringify(step3),
+    )
 
     /* ---------------- 6. 阶段 4：生成应用 ---------------- */
     await cdp.evaluate(CLICK_COMPOSER('确认并生成应用'))

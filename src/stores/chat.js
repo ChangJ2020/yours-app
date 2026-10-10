@@ -14,7 +14,7 @@ import {
 } from '@/engine/agent.js'
 import { compileSpecFromFeatureList, dedupeFeatures, generateFeatureList, applyFeatureInstruction } from '@/engine/localEngine.js'
 import { normalizeSpec, uid } from '@/engine/spec.js'
-import { isLlmReady } from '@/engine/llmClient.js'
+import { LlmError } from '@/engine/llmClient.js'
 import { useSettingsStore } from './settings.js'
 
 /** 阶段 key → 步骤下标 */
@@ -32,9 +32,16 @@ export const useChatStore = defineStore('chat', () => {
   const streamingText = ref('')
   const modeNote = ref('')
   const createdApp = ref(null)
-  const errorMsg = ref('')
   /** 用户在本应用上说过的所有需求原文（用于字段推导，绝不含应用描述本身） */
   const instructionLog = ref([])
+
+  /* ---- AI 调用状态（用于界面提示与重试） ---- */
+  const lastError = ref(null) // { kind, message, hint, userText, at }
+  const aiStatus = ref('idle') // idle | requesting | streaming | parsing | done | error
+  /** 最近一次错误文案（保留给旧版界面读数，等价于 lastError.message） */
+  const errorMsg = ref('')
+  const lastTurnMeta = ref(null) // { model, latencyMs, usage, mode }
+  let abortController = null
 
   const stepIndex = computed(() => STEP_ORDER.indexOf(stepKey.value))
   const steps = computed(() =>
@@ -45,7 +52,9 @@ export const useChatStore = defineStore('chat', () => {
   )
   const canGenerate = computed(() => Boolean(spec.value) && stepKey.value !== 'running')
   const suggestions = computed(() => suggestionsFor(stepKey.value, featureList.value))
-  const usingLlm = computed(() => isLlmReady(settings.llm))
+  /** 是否走真实模型（用户可一键切回内置引擎） */
+  const usingLlm = computed(() => settings.aiMode)
+  const canRetry = computed(() => Boolean(lastError.value?.userText))
 
   function reset() {
     messages.value = [greetingMessage()]
@@ -56,8 +65,11 @@ export const useChatStore = defineStore('chat', () => {
     createdApp.value = null
     streamingText.value = ''
     modeNote.value = ''
-    errorMsg.value = ''
     instructionLog.value = []
+    lastError.value = null
+    aiStatus.value = 'idle'
+    lastTurnMeta.value = null
+    abortGeneration()
   }
 
   function push(message) {
@@ -66,6 +78,28 @@ export const useChatStore = defineStore('chat', () => {
 
   function pushUser(text) {
     push({ id: uid('msg'), role: 'user', content: text, at: Date.now() })
+  }
+
+  /** 中断当前生成 */
+  function abortGeneration() {
+    if (abortController) {
+      abortController.abort()
+      abortController = null
+    }
+  }
+
+  /** 记录一次失败，供界面展示与「重试」使用 */
+  function recordError(error, userText) {
+    const kind = error instanceof LlmError ? error.kind : 'unknown'
+    lastError.value = {
+      kind,
+      message: error?.message || String(error),
+      hint: settings.errorHint(kind),
+      userText,
+      at: Date.now(),
+    }
+    errorMsg.value = lastError.value.message
+    aiStatus.value = 'error'
   }
 
   /** 本地模式下的完整对话推进（返回生成的应用 Spec，若已生成） */
@@ -159,100 +193,189 @@ export const useChatStore = defineStore('chat', () => {
 
   /**
    * 发送一条用户消息，推进对话状态机
-   * @returns {Promise<{created: object|null}>}
+   * - AI 模式：每轮都真实调用模型（流式），失败不静默回退，而是抛出可见错误 + 可重试 / 可手动降级
+   * - 内置引擎模式：走本地规则引擎（离线可用）
+   * @param {string} rawText
+   * @param {object} [options]
+   * @param {boolean} [options.retry] 标记为重试（不重复插入用户气泡）
+   * @returns {Promise<{created: object|null, error: object|null}>}
    */
-  async function send(rawText) {
+  async function send(rawText, { retry = false } = {}) {
     const text = String(rawText || '').trim()
-    if (!text || thinking.value) return { created: null }
+    if (!text || thinking.value) return { created: null, error: null }
+
+    lastError.value = null
     errorMsg.value = ''
-    pushUser(text)
+    if (!retry) pushUser(text)
 
     const wantSpec =
       (stepKey.value === 'features' || stepKey.value === 'spec') && isConfirm(text) && Boolean(featureList.value.length)
 
-    /* ---------- 有模型时：走真实大模型（失败自动回退本地） ---------- */
+    /* ------------------ AI 模式：真实调用模型 ------------------ */
     if (usingLlm.value) {
       thinking.value = true
+      aiStatus.value = 'requesting'
       streamingText.value = ''
-      const holder = { id: uid('msg'), role: 'assistant', content: '', at: Date.now(), streaming: true }
+      const startedAt = Date.now()
+      const holder = { id: uid('msg'), role: 'assistant', content: '', at: Date.now(), streaming: true, mode: 'ai' }
+      /** 把流式内容写回消息流。
+       * 注意：Vue 默认不做深响应，直接改 holder 上的字段不会触发重渲染，
+       * 必须替换 messages 数组中的那一项（这里踩过坑）。 */
+      const syncHolder = (patch = {}) => {
+        const next = { ...holder, ...patch }
+        const index = messages.value.findIndex((m) => m.id === holder.id)
+        if (index === -1) messages.value.push(next)
+        else messages.value[index] = next
+      }
+      abortController = new AbortController()
+
       try {
+        // 注意：当前这条用户消息已经进入 messages，构造历史时必须排除，
+        // 否则模型会收到两条一模一样的 user 消息（真实踩到的坑，用模拟服务抓包发现）
+        const history = messages.value.slice(0, -1)
         const result = await tryLlmTurn({
-          config: settings.llm,
+          config: settings.effectiveLlm,
           stage: stepKey.value,
-          history: messages.value.slice(-12),
+          history,
           userText: text,
           currentSpec: spec.value,
           featureList: featureList.value,
           wantSpec,
+          signal: abortController.signal,
           onDelta: (delta) => {
+            aiStatus.value = 'streaming'
             streamingText.value += delta
-            if (!messages.value.includes(holder)) push(holder)
-            holder.content = streamingText.value
+            syncHolder({ content: streamingText.value })
           },
         })
 
-        if (result?.ok) {
-          holder.streaming = false
-          holder.content = result.text || streamingText.value
-          if (result.specDraft) {
-            const normalized = normalizeSpec(
-              {
-                ...result.specDraft,
-                featureList: dedupeFeatures(result.specDraft.featureList || featureList.value).map((f, i) => ({
-                  ...f,
-                  id: f.id || `feat_${i + 1}`,
-                })),
-              },
-              spec.value || {},
-            )
-            spec.value = normalized
-            if (Array.isArray(normalized.featureList) && normalized.featureList.length) {
-              featureList.value = normalized.featureList
-            }
-            if (!draft.value) {
-              draft.value = { raw: text, appName: normalized.appName, entityName: normalized.entities[0].entityName, icon: normalized.icon }
-            }
-            // 模型已经给出完整 Spec，视为可生成
-            if (stepKey.value === 'describe') stepKey.value = 'features'
-            if (!messages.value.includes(holder)) push(holder)
-            if (isConfirm(text)) {
-              const app = finalize()
-              thinking.value = false
-              streamingText.value = ''
-              return { created: app }
-            }
-          } else if (stepKey.value === 'describe' && !featureList.value.length) {
-            // 模型只回了文本：用本地引擎补一份功能清单，保证流程可继续
-            const d = generateFeatureList(text)
-            draft.value = d
-            featureList.value = d.featureList
-            stepKey.value = 'features'
-          }
-          if (!messages.value.includes(holder)) push(holder)
-          modeNote.value = '由 AI 模型生成'
-          thinking.value = false
-          streamingText.value = ''
-          return { created: null }
-        }
+        if (!result?.ok) throw new LlmError(result?.error || '模型调用失败', 'unknown', result?.error)
 
-        // 模型不可用：回退本地，并在消息里标注原因
-        if (messages.value.includes(holder)) messages.value = messages.value.filter((m) => m !== holder)
-        modeNote.value = `模型不可用，已回退内置引擎（${result?.error || '未配置'}）`
-        errorMsg.value = result?.error || ''
+        // 成功：一次性写回最终态（含模型名、耗时、token 统计），并结束流式标记
+        const finalPatch = {
+          streaming: false,
+          content: result.text || streamingText.value,
+          model: result.model || settings.effectiveLlm.model,
+          latencyMs: result.latencyMs || Date.now() - startedAt,
+          usage: result.usage || null,
+          mode: 'ai',
+        }
+        syncHolder(finalPatch)
+        holder.streaming = false
+        holder.content = finalPatch.content
+
+        lastTurnMeta.value = {
+          model: finalPatch.model,
+          latencyMs: finalPatch.latencyMs,
+          usage: finalPatch.usage,
+          mode: 'ai',
+        }
+        modeNote.value = `由 ${finalPatch.model} 生成 · ${(finalPatch.latencyMs / 1000).toFixed(1)}s`
+
+        /* 模型给出结构化 Spec：直接采纳（校验后规范化） */
+        if (result.specDraft) {
+          aiStatus.value = 'parsing'
+          const normalized = normalizeSpec(
+            {
+              ...result.specDraft,
+              featureList: dedupeFeatures(result.specDraft.featureList || featureList.value).map((f, i) => ({
+                ...f,
+                id: f.id || `feat_${i + 1}`,
+              })),
+            },
+            spec.value || {},
+          )
+          spec.value = normalized
+          if (Array.isArray(normalized.featureList) && normalized.featureList.length) {
+            featureList.value = normalized.featureList
+          }
+          if (!draft.value) {
+            draft.value = {
+              raw: text,
+              appName: normalized.appName,
+              entityName: normalized.entities[0].entityName,
+              icon: normalized.icon,
+            }
+          }
+          // 模型给出结构化 Spec 后，流程推进：
+          //   首次描述（describe）→ 进入功能清单阶段
+          //   已在功能清单阶段（features）→ 说明需求已对齐，进入详细规格确认
+          if (stepKey.value === 'describe') {
+            stepKey.value = 'features'
+          } else if (stepKey.value === 'features') {
+            stepKey.value = 'spec'
+            modeNote.value = `${modeNote.value} · 已进入详细规格确认`
+          }
+        } else if (stepKey.value === 'describe' && !featureList.value.length) {
+          // 模型只回了文本、没给结构化数据：用内置引擎补一份功能清单，保证流程不卡住
+          const d = generateFeatureList(text)
+          draft.value = d
+          featureList.value = d.featureList
+          stepKey.value = 'features'
+          holder.note = '已用内置引擎补充功能清单（模型本轮未输出结构化数据）'
+        }
+        if (!draft.value?.raw) {
+          draft.value = { ...(draft.value || {}), raw: text }
+        }
+        aiStatus.value = 'done'
+        // 关键：模型即使在这一轮就给出了完整 Spec，也不能直接生成应用 ——
+        // 必须等用户明确确认（阶段 3 的确认语句，或点击「确认并生成应用」按钮）。
+        // 否则「第一句话说完应用就自己建好了」，与 PRD 的 4 步确认流程不符。
+        if (isConfirm(text) && stepKey.value === 'spec' && spec.value) {
+          const app = finalize()
+          return { created: app, error: null }
+        }
+        return { created: null, error: null }
       } catch (e) {
-        if (messages.value.includes(holder)) messages.value = messages.value.filter((m) => m !== holder)
-        modeNote.value = `模型调用失败，已回退内置引擎（${e?.message || e}）`
-        errorMsg.value = e?.message || String(e)
+        // 失败：移除「正在流式输出」的占位气泡，改为一条可见的错误消息
+        messages.value = messages.value.filter((m) => m.id !== holder.id)
+        const isAbort = e?.kind === 'aborted' || e?.name === 'AbortError'
+        recordError(e, text)
+        push({
+          id: uid('msg'),
+          role: 'assistant',
+          content: isAbort
+            ? '已停止本次生成。'
+            : `调用模型失败：${e?.message || e}\n\n> ${settings.errorHint(e?.kind)}`,
+          at: Date.now(),
+          tone: isAbort ? 'default' : 'error',
+          errorKind: e?.kind || 'unknown',
+        })
+        return { created: null, error: lastError.value }
       } finally {
         thinking.value = false
         streamingText.value = ''
+        abortController = null
       }
     }
 
-    /* ---------- 本地规则引擎 ---------- */
+    /* ------------------ 内置引擎模式（离线） ------------------ */
+    modeNote.value = '内置引擎模式（未调用模型）'
+    aiStatus.value = 'done'
     const created = advanceLocally(text)
-    if (created) return { created }
-    return { created: null }
+    return { created, error: null }
+  }
+
+  /** 重试上一次失败的请求 */
+  async function retryLast() {
+    const text = lastError.value?.userText
+    if (!text) return { created: null, error: null }
+    // 移除上次的错误气泡，避免堆叠
+    const last = messages.value[messages.value.length - 1]
+    if (last?.role === 'assistant' && last.errorKind) messages.value.pop()
+    return send(text, { retry: true })
+  }
+
+  /** 用户选择用内置引擎继续（显式降级，而不是静默回退） */
+  async function fallbackToLocal() {
+    const text = lastError.value?.userText
+    settings.setAiMode(false)
+    const last = messages.value[messages.value.length - 1]
+    if (last?.role === 'assistant' && last.errorKind) messages.value.pop()
+    if (!text) return { created: null, error: null }
+    modeNote.value = '已切换到内置引擎模式'
+    const created = advanceLocally(text)
+    return { created, error: null }
   }
 
   /** 点击「确认并生成应用」按钮 */
@@ -397,18 +520,18 @@ export const useChatStore = defineStore('chat', () => {
     if (usingLlm.value) {
       try {
         const result = await tryLlmTurn({
-          config: settings.llm,
+          config: settings.effectiveLlm,
           stage: 'iterate',
-          history: messages.value.slice(-10),
+          history: messages.value.slice(0, -1),
           userText: raw,
           currentSpec: spec.value,
           featureList: nextList,
           wantSpec: false,
         })
         if (result?.ok && result.text) commentary = result.text
-        else if (result && !result.ok) modeNote.value = `模型不可用，已回退内置引擎（${result.error || '未配置'}）`
+        else if (result && !result.ok) modeNote.value = `模型调用失败（${result.error || '未知原因'}），本次说明由内置引擎生成`
       } catch (e) {
-        modeNote.value = `模型调用失败，已回退内置引擎（${e?.message || e}）`
+        modeNote.value = `模型调用失败（${e?.message || e}），本次说明由内置引擎生成`
       }
     }
 
@@ -426,6 +549,7 @@ export const useChatStore = defineStore('chat', () => {
           '点击「✅ 应用到功能清单」，再在底部执行「重新构建并运行应用」即可生效。',
         ].join('\n'),
       at: Date.now(),
+      mode: commentary ? 'ai' : 'local',
     })
 
     return { featureList: nextList, notes, mode: commentary ? 'llm' : 'local' }
@@ -447,8 +571,16 @@ export const useChatStore = defineStore('chat', () => {
     canGenerate,
     suggestions,
     usingLlm,
+    // AI 调用可见状态
+    aiStatus,
+    lastError,
+    lastTurnMeta,
+    canRetry,
     reset,
     send,
+    retryLast,
+    fallbackToLocal,
+    abortGeneration,
     confirmAndGenerate,
     recompile,
     setFeatureList,

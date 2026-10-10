@@ -198,14 +198,22 @@ export function buildIteratedSpec({ currentSpec, featureList, draft }) {
 }
 
 /**
- * 尝试用 LLM 生成回复；失败或未配置时返回 null（由调用方走本地模板）
+ * 调用模型完成一轮对话。
+ * 成功：{ ok:true, mode:'llm', text, specDraft, model, latencyMs, usage }
+ * 失败：{ ok:false, mode:'llm-error', error, kind } —— 由调用方决定如何提示/降级，本层不静默吞掉错误。
  */
 export async function tryLlmTurn({ config, stage, history, userText, currentSpec, featureList, wantSpec, onDelta, signal }) {
   try {
     const result = await runAgentTurn({ config, stage, history, userText, currentSpec, featureList, wantSpec, onDelta, signal })
-    return result.ok ? result : null
+    return { ok: true, mode: 'llm', ...result }
   } catch (error) {
-    return { ok: false, mode: 'llm-error', error: error?.message || String(error) }
+    return {
+      ok: false,
+      mode: 'llm-error',
+      error: error?.message || String(error),
+      kind: error?.kind || 'unknown',
+      latencyMs: 0,
+    }
   }
 }
 

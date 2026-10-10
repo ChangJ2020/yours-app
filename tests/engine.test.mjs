@@ -18,6 +18,13 @@ import {
 import { respondToDescription } from '../src/engine/agent.js'
 import { bumpMinorVersion, normalizeSpec, slugKey } from '../src/engine/spec.js'
 import { diffSpec, migrateRecords } from '../src/engine/diff.js'
+import {
+  LlmError,
+  LLM_ERROR_HINT,
+  isLlmReady,
+  resolveEndpoint,
+  resolveLlmConfig,
+} from '../src/engine/llmClient.js'
 import { validateRecord } from '../src/engine/validate.js'
 
 /* ------------------------------ 意图识别 ------------------------------ */
@@ -609,6 +616,47 @@ test('类型变更：数字字段文本化不丢数据，非法数字转入归�
   assert.equal(records[1].values.amount, '')
   assert.equal(records[1]._archived.amount.value, '待确认')
   assert.equal(stats.archivedValues, 1)
+})
+
+/* ------------------------- LLM 接口地址与配置 ------------------------- */
+
+test('接口地址归一化：补全 /chat/completions，兼容各种写法', () => {
+  assert.equal(resolveEndpoint('https://api.deepseek.com/v1'), 'https://api.deepseek.com/v1/chat/completions')
+  assert.equal(resolveEndpoint('https://api.deepseek.com/v1/'), 'https://api.deepseek.com/v1/chat/completions')
+  assert.equal(
+    resolveEndpoint('https://api.deepseek.com/v1/chat/completions'),
+    'https://api.deepseek.com/v1/chat/completions',
+  )
+  assert.equal(resolveEndpoint('https://api.openai.com'), 'https://api.openai.com/v1/chat/completions')
+  assert.equal(resolveEndpoint('http://localhost:11434/v1'), 'http://localhost:11434/v1/chat/completions')
+})
+
+test('接口地址为空时抛出可识别的配置错误', () => {
+  assert.throws(
+    () => resolveEndpoint(''),
+    (e) => e instanceof LlmError && e.kind === 'config',
+  )
+})
+
+test('配置解析：仅本地填写也能就绪，并标记来源', () => {
+  const local = resolveLlmConfig({ enabled: true, baseUrl: 'http://127.0.0.1:8787/v1', model: 'mock-ya', apiKey: 'k' })
+  assert.equal(isLlmReady(local), true)
+  assert.equal(local.apiKeySource, 'local')
+  assert.equal(local.baseUrlSource, 'local')
+})
+
+test('配置不完整时不会被误判为就绪（避免发出必失败的请求）', () => {
+  assert.equal(isLlmReady({ enabled: true, baseUrl: 'http://x/v1', model: 'm', apiKey: 'k' }) ? true : false, true)
+  assert.equal(isLlmReady(resolveLlmConfig({ enabled: false, baseUrl: 'http://x/v1', model: 'm', apiKey: 'k' })), false)
+  assert.equal(isLlmReady(resolveLlmConfig({ enabled: true, baseUrl: '', model: 'm', apiKey: 'k' })), false)
+  assert.equal(isLlmReady(resolveLlmConfig({ enabled: true, baseUrl: 'http://x/v1', model: 'm', apiKey: '' })), false)
+  assert.equal(isLlmReady(resolveLlmConfig({ enabled: true, baseUrl: 'http://x/v1', model: '', apiKey: 'k' })), false)
+})
+
+test('每种错误分类都有可操作的中文提示', () => {
+  for (const kind of ['config', 'auth', 'rate_limit', 'network', 'server', 'aborted', 'empty', 'unknown']) {
+    assert.ok(LLM_ERROR_HINT[kind] && LLM_ERROR_HINT[kind].length > 4, `缺少 ${kind} 的提示文案`)
+  }
 })
 
 /* ------------------------------- 版本号 ------------------------------- */

@@ -1,13 +1,43 @@
 <template>
   <div class="studio">
-    <!-- 进度指示条 -->
+    <!-- 进度指示条 + 引擎状态 -->
     <div class="progress-card">
       <StepIndicator :steps="chat.steps" />
       <div class="progress-foot">
-        <span class="ya-badge" :class="chat.usingLlm ? 'ya-badge-brand' : 'ya-badge-info'">
-          {{ chat.usingLlm ? '🤖 ' + modeLabel : '⚙️ 内置生成引擎' }}
-        </span>
-        <span v-if="chat.modeNote" class="mode-note">{{ chat.modeNote }}</span>
+        <button
+          class="mode-chip"
+          :data-mode="aiMode ? 'ai' : 'local'"
+          :title="aiMode ? '当前由真实大模型对话生成，点击切回内置引擎' : '当前使用内置规则引擎（离线），点击启用 AI 对话'"
+          @click="$emit('toggle-mode', !aiMode)"
+        >
+          <span class="mode-dot" />
+          {{ aiMode ? `AI 对话 · ${modelName}` : '内置引擎模式' }}
+          <span class="mode-switch">{{ aiMode ? '切回内置' : '启用 AI' }}</span>
+        </button>
+
+        <span v-if="aiStatusText" class="ai-status" :data-state="chat.aiStatus">{{ aiStatusText }}</span>
+        <span v-else-if="chat.modeNote" class="mode-note">{{ chat.modeNote }}</span>
+
+        <button v-if="!aiMode" class="ya-btn ya-btn-quiet ya-btn-sm" @click="$emit('open-settings')">
+          ⚙️ 配置 AI 接口
+        </button>
+      </div>
+    </div>
+
+    <!-- 模型调用失败提示（不再静默回退，问题可见且可操作） -->
+    <div v-if="chat.lastError" class="ai-error">
+      <span class="err-icon">⛔</span>
+      <div class="ya-grow">
+        <div class="err-title">{{ errorTitle }}</div>
+        <div class="err-msg">{{ chat.lastError.message }}</div>
+        <div class="err-hint">💡 {{ chat.lastError.hint }}</div>
+      </div>
+      <div class="err-actions">
+        <button class="ya-btn ya-btn-ghost ya-btn-sm" :disabled="chat.thinking" @click="$emit('retry')">🔄 重试</button>
+        <button class="ya-btn ya-btn-quiet ya-btn-sm" :disabled="chat.thinking" @click="$emit('fallback-local')">
+          用内置引擎继续
+        </button>
+        <button class="ya-btn ya-btn-quiet ya-btn-sm" @click="$emit('open-settings')">⚙️ 检查配置</button>
       </div>
     </div>
 
@@ -15,10 +45,11 @@
     <div ref="scrollEl" class="stream">
       <ChatBubble v-for="msg in chat.messages" :key="msg.id" :message="msg" />
 
-      <div v-if="chat.thinking && !chat.streamingText" class="thinking">
+      <div v-if="chat.thinking" class="thinking">
         <div class="avatar">YA</div>
         <div class="dots"><span /><span /><span /></div>
-        <span class="thinking-text">正在梳理你的业务需求…</span>
+        <span class="thinking-text">{{ aiStatusText || '正在梳理你的业务需求…' }}</span>
+        <button class="ya-btn ya-btn-quiet ya-btn-sm" @click="$emit('stop')">■ 停止</button>
       </div>
     </div>
 
@@ -56,14 +87,15 @@
             ♻️
           </button>
           <button class="ya-btn ya-btn-primary" :disabled="chat.thinking || !text.trim()" @click="submit()">
-            {{ chat.thinking ? '思考中…' : '发送' }}
+            {{ chat.thinking ? '生成中…' : '发送' }}
           </button>
         </div>
       </div>
 
       <div class="foot">
         <span class="hint">
-          <span class="ya-kbd">Enter</span> 发送 · <span class="ya-kbd">Shift+Enter</span> 换行
+          <span class="ya-kbd">Enter</span> 发送 · <span class="ya-kbd">Shift+Enter</span> 换行 ·
+          {{ aiMode ? '每轮均调用真实模型' : '当前不调用模型' }}
         </span>
         <button
           v-if="chat.canGenerate"
@@ -85,10 +117,11 @@ import StepIndicator from './StepIndicator.vue'
 
 const props = defineProps({
   chat: { type: Object, required: true },
-  modeLabel: { type: String, default: '' },
+  aiMode: { type: Boolean, default: false },
+  modelName: { type: String, default: '' },
 })
 
-const emit = defineEmits(['send', 'generate', 'reset'])
+const emit = defineEmits(['send', 'generate', 'reset', 'stop', 'retry', 'fallback-local', 'toggle-mode', 'open-settings'])
 
 const text = ref('')
 const scrollEl = ref(null)
@@ -105,6 +138,35 @@ const placeholder = computed(() => {
     default:
       return '应用已生成，可继续描述新的需求'
   }
+})
+
+const aiStatusText = computed(() => {
+  if (!props.chat.thinking) return ''
+  switch (props.chat.aiStatus) {
+    case 'requesting':
+      return '正在请求模型…'
+    case 'streaming':
+      return '模型正在流式输出…'
+    case 'parsing':
+      return '正在解析模型返回的 Spec…'
+    default:
+      return '正在思考…'
+  }
+})
+
+const errorTitle = computed(() => {
+  const kind = props.chat.lastError?.kind
+  return (
+    {
+      config: '模型配置不完整',
+      auth: 'API Key 鉴权失败',
+      rate_limit: '触发限流或额度不足',
+      network: '网络或跨域问题',
+      server: '模型服务端异常',
+      empty: '模型返回空内容',
+      aborted: '已停止生成',
+    }[kind] || '模型调用失败'
+  )
 })
 
 function submit(preset) {
@@ -153,9 +215,117 @@ defineExpose({ focus: () => inputEl.value?.focus(), submit })
   flex-wrap: wrap;
 }
 
+.mode-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  height: 26px;
+  padding: 0 10px;
+  border-radius: var(--radius-full);
+  font-size: 12px;
+  font-weight: 600;
+  border: 1px solid var(--border);
+  background: var(--bg-subtle);
+  color: var(--text-secondary);
+  transition: all var(--dur) var(--ease-out);
+}
+
+.mode-chip:hover {
+  border-color: var(--brand-400);
+}
+
+.mode-chip[data-mode='ai'] {
+  background: var(--brand-50);
+  border-color: color-mix(in srgb, var(--brand-500) 40%, transparent);
+  color: var(--brand-700);
+}
+
+:root[data-theme='dark'] .mode-chip[data-mode='ai'] {
+  color: var(--brand-300);
+}
+
+.mode-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--text-muted);
+}
+
+.mode-chip[data-mode='ai'] .mode-dot {
+  background: var(--ok-500);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--ok-500) 22%, transparent);
+}
+
+.mode-switch {
+  font-size: 11px;
+  font-weight: 500;
+  opacity: 0.62;
+  border-left: 1px solid currentColor;
+  padding-left: 7px;
+}
+
+.ai-status {
+  font-size: 11.5px;
+  color: var(--brand-600);
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.ai-status::before {
+  content: '';
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--brand-500);
+  animation: ya-blink 1s infinite;
+}
+
 .mode-note {
   font-size: 11.5px;
   color: var(--text-muted);
+}
+
+.ai-error {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  padding: 12px 14px;
+  border-radius: var(--radius-md);
+  background: var(--danger-50);
+  border: 1px solid color-mix(in srgb, var(--danger-500) 30%, transparent);
+  animation: ya-fade-up 220ms var(--ease-out) both;
+}
+
+.err-icon {
+  font-size: 15px;
+}
+
+.err-title {
+  font-size: 13px;
+  font-weight: 680;
+  color: var(--danger-600);
+}
+
+.err-msg {
+  font-size: 12.5px;
+  color: var(--text-secondary);
+  margin-top: 3px;
+  line-height: 1.55;
+  word-break: break-word;
+}
+
+.err-hint {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-top: 5px;
+}
+
+.err-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  flex: none;
 }
 
 .stream {
@@ -289,5 +459,12 @@ defineExpose({ focus: () => inputEl.value?.focus(), submit })
 .hint {
   font-size: 11.5px;
   color: var(--text-muted);
+}
+
+@media (max-width: 720px) {
+  .err-actions {
+    flex-direction: row;
+    flex-wrap: wrap;
+  }
 }
 </style>

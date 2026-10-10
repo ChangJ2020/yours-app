@@ -1,0 +1,591 @@
+/* ==========================================================================
+   Yours App (YA) · 组件样式层
+   与 base.css 配套，提供按钮 / 卡片 / 徽章 / 表单控件等通用类
+   ========================================================================== */
+
+/* ---------------------------------- 布局 ---------------------------------- */
+.ya-shell {
+  max-width: var(--shell-max);
+  margin: 0 auto;
+  padding: 0 var(--space-6);
+}
+
+.ya-stack {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+.ya-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.ya-row-between {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+
+.ya-grow {
+  flex: 1;
+  min-width: 0;
+}
+
+/* ---------------------------------- 顶栏 ---------------------------------- */
+.ya-topbar {
+  position: sticky;
+  top: 0;
+  z-index: 40;
+  height: var(--header-h);
+  background: color-mix(in srgb, var(--bg-elevated) 88%, transparent);
+  backdrop-filter: blur(14px);
+  border-bottom: 1px solid var(--border);
+}
+
+.ya-topbar-inner {
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-4);
+}
+
+.ya-logo {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  font-weight: 700;
+  font-size: 16px;
+  letter-spacing: 0.2px;
+  color: var(--text-primary);
+}
+
+.ya-logo-mark {
+  width: 34px;
+  height: 34px;
+  border-radius: 10px;
+  display: grid;
+  place-items: center;
+  color: #fff;
+  font-family: var(--font-mono);
+  font-size: 13px;
+  font-weight: 700;
+  background: linear-gradient(135deg, var(--brand-500), var(--accent-500));
+  box-shadow: var(--shadow-brand);
+}
+
+.ya-logo-sub {
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--text-muted);
+  letter-spacing: 0.4px;
+}
+
+/* ---------------------------------- 卡片 ---------------------------------- */
+.ya-card {
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-sm);
+}
+
+.ya-card-pad {
+  padding: var(--space-5);
+}
+
+.ya-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: var(--space-4) var(--space-5);
+  border-bottom: 1px solid var(--border);
+}
+
+.ya-card-title {
+  font-size: 15px;
+  font-weight: 650;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.ya-card-desc {
+  font-size: 12.5px;
+  color: var(--text-muted);
+  margin-top: 2px;
+}
+
+.ya-section-title {
+  font-size: 15px;
+  font-weight: 650;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.ya-section-title small {
+  font-weight: 500;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+/* ---------------------------------- 按钮 ---------------------------------- */
+.ya-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  height: 36px;
+  padding: 0 14px;
+  border-radius: var(--radius-sm);
+  font-size: 13.5px;
+  font-weight: 600;
+  border: 1px solid transparent;
+  transition: all var(--dur) var(--ease-out);
+  white-space: nowrap;
+  user-select: none;
+}
+
+.ya-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.ya-btn-primary {
+  background: linear-gradient(135deg, var(--brand-600), var(--brand-500));
+  color: #fff;
+  box-shadow: var(--shadow-brand);
+}
+
+.ya-btn-primary:hover:not(:disabled) {
+  transform: translateY(-1px);
+  box-shadow: 0 10px 26px rgba(79, 70, 229, 0.36);
+}
+
+.ya-btn-primary:active:not(:disabled) {
+  transform: translateY(0);
+}
+
+.ya-btn-ghost {
+  background: var(--bg-elevated);
+  border-color: var(--border);
+  color: var(--text-secondary);
+}
+
+.ya-btn-ghost:hover:not(:disabled) {
+  border-color: var(--border-strong);
+  color: var(--text-primary);
+  background: var(--bg-subtle);
+}
+
+.ya-btn-quiet {
+  background: transparent;
+  color: var(--text-secondary);
+}
+
+.ya-btn-quiet:hover:not(:disabled) {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.ya-btn-danger {
+  background: var(--danger-50);
+  color: var(--danger-600);
+  border-color: color-mix(in srgb, var(--danger-500) 30%, transparent);
+}
+
+.ya-btn-danger:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--danger-500) 16%, transparent);
+}
+
+.ya-btn-success {
+  background: linear-gradient(135deg, var(--ok-600), var(--ok-500));
+  color: #fff;
+  box-shadow: 0 8px 22px rgba(16, 185, 129, 0.3);
+}
+
+.ya-btn-sm {
+  height: 30px;
+  padding: 0 10px;
+  font-size: 12.5px;
+  border-radius: var(--radius-xs);
+}
+
+.ya-btn-lg {
+  height: 44px;
+  padding: 0 22px;
+  font-size: 15px;
+  border-radius: var(--radius-md);
+}
+
+.ya-btn-icon {
+  width: 34px;
+  height: 34px;
+  padding: 0;
+}
+
+/* ---------------------------------- 徽章 ---------------------------------- */
+.ya-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 22px;
+  padding: 0 9px;
+  border-radius: var(--radius-full);
+  font-size: 11.5px;
+  font-weight: 600;
+  background: var(--bg-sunken);
+  color: var(--text-secondary);
+  border: 1px solid transparent;
+  white-space: nowrap;
+}
+
+.ya-badge-brand {
+  background: var(--brand-50);
+  color: var(--brand-700);
+}
+:root[data-theme='dark'] .ya-badge-brand {
+  color: var(--brand-300);
+}
+.ya-badge-ok {
+  background: var(--ok-50);
+  color: var(--ok-600);
+}
+.ya-badge-warn {
+  background: var(--warn-50);
+  color: var(--warn-600);
+}
+.ya-badge-danger {
+  background: var(--danger-50);
+  color: var(--danger-600);
+}
+.ya-badge-info {
+  background: var(--info-50);
+  color: var(--info-500);
+}
+.ya-badge-mono {
+  font-family: var(--font-mono);
+  letter-spacing: 0.3px;
+}
+
+/* -------------------------------- 表单控件 -------------------------------- */
+.ya-input,
+.ya-select,
+.ya-textarea {
+  width: 100%;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 8px 12px;
+  font-size: 13.5px;
+  color: var(--text-primary);
+  transition: border-color var(--dur), box-shadow var(--dur), background var(--dur);
+}
+
+.ya-textarea {
+  min-height: 84px;
+  resize: vertical;
+  line-height: 1.6;
+}
+
+.ya-input:hover,
+.ya-select:hover,
+.ya-textarea:hover {
+  border-color: var(--border-strong);
+}
+
+.ya-input:focus,
+.ya-select:focus,
+.ya-textarea:focus {
+  outline: none;
+  border-color: var(--brand-500);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--brand-500) 18%, transparent);
+}
+
+.ya-input::placeholder,
+.ya-textarea::placeholder {
+  color: var(--text-muted);
+}
+
+.ya-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.ya-label {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.ya-label .req {
+  color: var(--danger-500);
+}
+
+.ya-help {
+  font-size: 11.5px;
+  color: var(--text-muted);
+}
+
+.ya-error {
+  font-size: 11.5px;
+  color: var(--danger-600);
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.ya-switch {
+  position: relative;
+  width: 42px;
+  height: 24px;
+  border-radius: var(--radius-full);
+  background: var(--border-strong);
+  transition: background var(--dur);
+  flex: none;
+}
+
+.ya-switch[data-on='true'] {
+  background: var(--brand-500);
+}
+
+.ya-switch::after {
+  content: '';
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: var(--shadow-xs);
+  transition: transform var(--dur) var(--ease-out);
+}
+
+.ya-switch[data-on='true']::after {
+  transform: translateX(18px);
+}
+
+.ya-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 13px;
+  cursor: pointer;
+  color: var(--text-secondary);
+}
+
+/* ---------------------------------- 标签页 --------------------------------- */
+.ya-tabs {
+  display: inline-flex;
+  padding: 4px;
+  gap: 4px;
+  background: var(--bg-sunken);
+  border-radius: var(--radius-md);
+}
+
+.ya-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  height: 34px;
+  padding: 0 16px;
+  border-radius: var(--radius-sm);
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--text-muted);
+  transition: all var(--dur) var(--ease-out);
+}
+
+.ya-tab:hover {
+  color: var(--text-primary);
+}
+
+.ya-tab[data-active='true'] {
+  background: var(--bg-elevated);
+  color: var(--brand-600);
+  box-shadow: var(--shadow-xs);
+}
+
+/* ---------------------------------- 表格 ---------------------------------- */
+.ya-table-wrap {
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-elevated);
+}
+
+.ya-table {
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+  font-size: 13px;
+}
+
+.ya-table thead th {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: var(--bg-subtle);
+  text-align: left;
+  font-weight: 650;
+  font-size: 12px;
+  color: var(--text-secondary);
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+  user-select: none;
+}
+
+.ya-table tbody td {
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+  color: var(--text-primary);
+  vertical-align: middle;
+}
+
+.ya-table tbody tr:last-child td {
+  border-bottom: none;
+}
+
+.ya-table tbody tr:hover td {
+  background: var(--bg-hover);
+}
+
+.ya-table .num {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+.ya-table .col-actions {
+  width: 1%;
+  white-space: nowrap;
+  text-align: right;
+}
+
+/* ---------------------------------- 弹窗 ---------------------------------- */
+.ya-modal-mask {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  background: rgba(8, 13, 26, 0.5);
+  backdrop-filter: blur(3px);
+  display: grid;
+  place-items: center;
+  padding: var(--space-6);
+  animation: ya-fade-up 160ms var(--ease-out) both;
+}
+
+.ya-modal {
+  width: min(620px, 100%);
+  max-height: 86vh;
+  overflow: auto;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xl);
+  box-shadow: var(--shadow-lg);
+  animation: ya-pop 220ms var(--ease-spring) both;
+}
+
+.ya-modal-head {
+  padding: var(--space-5) var(--space-6) var(--space-3);
+}
+
+.ya-modal-body {
+  padding: 0 var(--space-6) var(--space-4);
+}
+
+.ya-modal-foot {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space-2);
+  padding: var(--space-4) var(--space-6) var(--space-5);
+  border-top: 1px solid var(--border);
+  background: var(--bg-subtle);
+  border-radius: 0 0 var(--radius-xl) var(--radius-xl);
+}
+
+/* ---------------------------------- 空状态 -------------------------------- */
+.ya-empty {
+  text-align: center;
+  padding: var(--space-10) var(--space-6);
+  color: var(--text-muted);
+}
+
+.ya-empty-icon {
+  font-size: 34px;
+  margin-bottom: var(--space-3);
+  opacity: 0.8;
+}
+
+/* ---------------------------------- 提示条 -------------------------------- */
+.ya-note {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  padding: 10px 12px;
+  border-radius: var(--radius-sm);
+  font-size: 12.5px;
+  line-height: 1.55;
+  border: 1px solid transparent;
+}
+
+.ya-note-info {
+  background: var(--info-50);
+  color: var(--info-500);
+  border-color: color-mix(in srgb, var(--info-500) 22%, transparent);
+}
+.ya-note-warn {
+  background: var(--warn-50);
+  color: var(--warn-600);
+  border-color: color-mix(in srgb, var(--warn-500) 26%, transparent);
+}
+.ya-note-ok {
+  background: var(--ok-50);
+  color: var(--ok-600);
+  border-color: color-mix(in srgb, var(--ok-500) 24%, transparent);
+}
+.ya-note-danger {
+  background: var(--danger-50);
+  color: var(--danger-600);
+  border-color: color-mix(in srgb, var(--danger-500) 24%, transparent);
+}
+
+/* ---------------------------------- 其他 ---------------------------------- */
+.ya-divider {
+  height: 1px;
+  background: var(--border);
+  margin: var(--space-4) 0;
+}
+
+.ya-mono {
+  font-family: var(--font-mono);
+}
+
+.ya-muted {
+  color: var(--text-muted);
+}
+
+.ya-kbd {
+  display: inline-block;
+  padding: 1px 6px;
+  border: 1px solid var(--border-strong);
+  border-bottom-width: 2px;
+  border-radius: 5px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-secondary);
+  background: var(--bg-subtle);
+}
+
+.ya-scroll-x {
+  overflow-x: auto;
+}

@@ -12,20 +12,25 @@
 ```bash
 npm install       # 安装依赖（如依赖已就绪可跳过）
 npm run dev       # 启动开发服务器（默认 http://localhost:5273）
+
+注意：项目大模型配置请查看： 模型配置.md
 ```
 
 打开浏览器访问提示的地址即可。首次打开会自动植入一个演示应用「员工工时记录助手」（含 14 条示例数据），
 可直接进入体验填报、检索、导出、迭代与重建。
+
+注意查看 模型配置.md 进行模型配置
+------------------------------------演示可以只看到这里-----------------------------------------
 
 ### 1.1 配置 AI 对话（推荐，一次配置长期使用）
 
 对话生成默认**走真实大模型**。把接口信息写进环境变量，打开页面即可直接对话，无需每次手填：
 
 ```bash
-cp .env.example .env.local      # Windows: copy .env.example .env.local
+cp .env.example
 ```
 
-编辑 `.env.local`：
+编辑 `.env.example`：
 
 ```ini
 VITE_YA_LLM_BASE_URL=https://api.deepseek.com/v1   # 任何 OpenAI 兼容接口
